@@ -87,6 +87,10 @@ def handle_message(message):
 # Запуск бота
 bot.polling()
 
+# Бесконечный цикл с задержкой
+while True:
+    time.sleep(10)
+
 # Закрытие соединения с базой данных после завершения работы бота
 cursor.close()
 conn.close()
