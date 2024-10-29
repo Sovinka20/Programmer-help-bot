@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 import telebot
 import psycopg2
+import time
 
 # Загрузка переменных окружения из файла .env
 load_dotenv()
@@ -22,17 +23,23 @@ if not all([TELEGRAM_BOT_TOKEN, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT]
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # Подключение к базе данных PostgreSQL
-try:
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    cursor = conn.cursor()
-except psycopg2.Error as e:
-    print(f"Ошибка подключения к базе данных: {e}")
+def connect_to_db():
+    try:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        cursor = conn.cursor()
+        return conn, cursor
+    except psycopg2.Error as e:
+        print(f"Ошибка подключения к базе данных: {e}")
+        return None, None
+
+conn, cursor = connect_to_db()
+if not conn or not cursor:
     exit()
 
 # Создание таблицы keywords, если она не существует
@@ -65,24 +72,64 @@ except psycopg2.Error as e:
 def send_welcome(message):
     bot.reply_to(message, 'Привет! Я бот-справочник. Напиши мне ключевое слово, и я дам тебе информацию.')
 
+def check_connection():
+    try:
+        cursor.execute("SELECT 1")
+        return True
+    except psycopg2.Error:
+        return False
+
+def retry_connection(func, retries=3, delay=5):
+    for attempt in range(retries):
+        try:
+            return func()
+        except psycopg2.Error as e:
+            print(f"Ошибка подключения к базе данных: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                raise
+
+def retry_send_message(chat_id, text, retries=3, delay=5):
+    for attempt in range(retries):
+        try:
+            bot.send_message(chat_id, text)
+            return
+        except telebot.apihelper.ApiException as e:
+            print(f"Ошибка отправки сообщения: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                raise
+
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     text = message.text.lower()
     
-    try:
-        # Запрос к базе данных с использованием LIKE для частичного поиска
+    if not check_connection():
+        global conn, cursor
+        conn, cursor = connect_to_db()
+        if not conn or not cursor:
+            bot.reply_to(message, "Произошла ошибка при обработке вашего запроса.")
+            return
+    
+    def execute_query():
         cursor.execute("SELECT info FROM keywords WHERE keyword LIKE %s", (f"%{text}%",))
         result = cursor.fetchone()
+        return result
+    
+    try:
+        result = retry_connection(execute_query)
         
         if result:
             response = result[0]
         else:
             response = "К сожалению, я не знаю такого ключевого слова."
         
-        bot.reply_to(message, response)
+        retry_send_message(message.chat.id, response)
     except psycopg2.Error as e:
         print(f"Ошибка при выполнении запроса: {e}")
-        bot.reply_to(message, "Произошла ошибка при обработке вашего запроса.")
+        retry_send_message(message.chat.id, "Произошла ошибка при обработке вашего запроса.")
 
 # Запуск бота
 bot.polling()
